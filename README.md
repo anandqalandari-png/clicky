@@ -30,6 +30,17 @@ Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) th
 
 This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
 
+## First-Timer Mode (added in this fork)
+
+Clicky assumes you're already comfortable with computers. **First-Timer Mode** is for people who aren't, like our parents' generation, who have never used ChatGPT or Claude and get overwhelmed by technical screens.
+
+- **Onboarding:** Clicky asks, out loud and in large on-screen text, how old you are and how comfortable you are with computers on a 1–5 scale (with big clickable buttons). The answers are saved as a profile.
+- **Levels 1–2** get a different Clicky: one step and one arrow at a time, plain words instead of jargon ("the long white bar at the very top where the website address goes"), a bigger pointer, a slower and calmer voice, a confirmation after every step, and a helper box with big **I did it** / **I'm lost** buttons. Level 1 users start with a short welcome demo. Levels 3–5 keep normal Clicky.
+- **Showcase flow:** "help me file my taxes" (India). Clicky asks a few simple questions one at a time, picks the right form, then guides you to incometax.gov.in and explains each box in plain words.
+- **Safety, enforced in code:** First-Timer Mode only speaks and points. It never clicks, types, fills in, or submits anything. `FirstTimerSafetyGuard.swift` strips any click/type/fill/submit instructions from the AI's reply, keeps only one arrow, adds a fixed "only you decide" warning when pointing at Submit/Pay/Confirm/e-Verify buttons, and hides PAN/Aadhaar numbers said out loud before they leave the Mac.
+
+Start it from the Clicky menu bar panel → **Start First-Timer Mode**.
+
 ## Get started with Claude Code
 
 The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
@@ -112,17 +123,15 @@ ELEVENLABS_VOICE_ID=...
 
 Then update the proxy URLs in the Swift code to point to `http://localhost:8787` instead of the deployed Worker URL while developing. Grep for `clicky-proxy` to find them all.
 
-### 3. Update the proxy URLs in the app
+### 3. Add your Worker URL to the app
 
-The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
+The Worker URL lives in one private file that is git-ignored, so it never ends up on GitHub (anyone with the URL could spend your API credits). Create it from the example:
 
 ```bash
-grep -r "clicky-proxy" leanring-buddy/
+cp WorkerConfiguration.example.swift leanring-buddy/WorkerConfiguration.swift
 ```
 
-You'll find it in:
-- `CompanionManager.swift` — Claude chat + ElevenLabs TTS
-- `AssemblyAIStreamingTranscriptionProvider.swift` — AssemblyAI token endpoint
+Then open `leanring-buddy/WorkerConfiguration.swift` and replace `https://your-worker-name.your-subdomain.workers.dev` with your Worker URL. Both the chat/TTS calls (`CompanionManager.swift`) and the AssemblyAI token call (`AssemblyAIStreamingTranscriptionProvider.swift`) read it from there.
 
 ### 4. Open in Xcode and run
 

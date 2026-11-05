@@ -46,6 +46,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
 
+**First-Timer Mode**: An optional mode for people who aren't comfortable with computers, started from the menu bar panel. It asks the user's age and a 1–5 computer comfort level (spoken + large on-screen text + big buttons) and saves them as a persistent profile. Levels 1–2 get simple step-by-step guidance: a plain-language system prompt that also includes facts about the Mac Claude can't see (Dock auto-hide, whether Chrome is installed) and the user's current goal, one arrow at a time, a bigger cursor, a slower ElevenLabs voice, a movable/hideable helper box with "I did it" / "I'm lost" buttons, and a ~20s welcome demo for brand-new level 1 users. When the goal is about taxes it adds an India income-tax playbook. Levels 3–5 use normal Clicky. **Hard safety rule:** First-Timer Mode only speaks and points — it never clicks, types, fills in, or submits anything. `FirstTimerSafetyGuard` enforces this in code (strips any action-looking tags, keeps one POINT tag, adds a fixed "only you decide" warning on submit/pay/confirm buttons, and hides spoken PAN/Aadhaar numbers before they leave the Mac).
+
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
 ## Key Files
@@ -53,9 +55,9 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~1390 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~840 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -68,11 +70,16 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
-| `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
+| `ElevenLabsTTSClient.swift` | ~91 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. Optional slower, calmer voice for First-Timer Mode. |
+| `FirstTimerProfile.swift` | ~81 | First-Timer Mode profile: age + 1–5 `ComputerComfortLevel`, persisted to UserDefaults. A saved profile means the mode is on. |
+| `FirstTimerModeController.swift` | ~740 | First-Timer Mode state: onboarding questions and spoken-answer parsing, welcome demo state, helper box actions ("I did it" / "I'm lost"), current-goal tracking, Mac setup facts (Dock auto-hide, Chrome), and the plain-language system prompt including the India tax playbook. |
+| `FirstTimerPanelView.swift` | ~606 | Clickable, non-activating floating panel for First-Timer Mode: large question text, 1–5 buttons, the helper box, Move/Hide/Turn off controls. Separate from the click-through cursor overlay. |
+| `FirstTimerSafetyGuard.swift` | ~217 | Code-enforced First-Timer safety rules: speak and point only, one POINT tag, strip click/type/fill/submit tags, final-button warning, PAN/Aadhaar redaction. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
+| `WorkerConfiguration.swift` | ~17 | **Git-ignored.** Holds `ClickyWorkerConfiguration.workerBaseURL`, the user's own Worker URL. Created from `WorkerConfiguration.example.swift` at the repo root. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 

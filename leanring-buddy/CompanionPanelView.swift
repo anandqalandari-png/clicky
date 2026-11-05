@@ -58,6 +58,17 @@ struct CompanionPanelView: View {
             //         .padding(.horizontal, 16)
             // }
 
+            if companionManager.allPermissionsGranted {
+                Spacer()
+                    .frame(height: 16)
+
+                FirstTimerModeMenuSection(
+                    companionManager: companionManager,
+                    firstTimerModeController: companionManager.firstTimerModeController
+                )
+                .padding(.horizontal, 16)
+            }
+
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
                 Spacer()
                     .frame(height: 16)
@@ -758,4 +769,74 @@ struct CompanionPanelView: View {
         }
     }
 
+}
+
+// MARK: - First-Timer Mode Menu Section
+
+/// The First-Timer Mode controls in the menu bar panel. A separate view so it
+/// can observe FirstTimerModeController directly — CompanionPanelView only
+/// observes CompanionManager, which doesn't republish the controller's changes.
+private struct FirstTimerModeMenuSection: View {
+    @ObservedObject var companionManager: CompanionManager
+    @ObservedObject var firstTimerModeController: FirstTimerModeController
+
+    @State private var isStartButtonHovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("FIRST-TIMER MODE")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            if let savedUserProfile = firstTimerModeController.savedUserProfile {
+                Text(firstTimerModeStatusDescription(for: savedUserProfile))
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button(action: {
+                companionManager.startFirstTimerMode()
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "figure.wave")
+                        .font(.system(size: 12, weight: .medium))
+                    Text(firstTimerModeController.savedUserProfile == nil ? "Start First-Timer Mode" : "Ask the Questions Again")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                        .fill(isStartButtonHovered ? DS.Colors.accentHover : DS.Colors.accent)
+                )
+            }
+            .buttonStyle(.plain)
+            .onHover { isHoveringNow in
+                isStartButtonHovered = isHoveringNow
+            }
+            .pointerCursor()
+
+            if firstTimerModeController.savedUserProfile != nil {
+                Button(action: {
+                    companionManager.turnOffFirstTimerMode()
+                }) {
+                    Text("Turn Off First-Timer Mode")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+        }
+    }
+
+    private func firstTimerModeStatusDescription(for savedUserProfile: FirstTimerUserProfile) -> String {
+        let ageDescription = savedUserProfile.ageInYears.map { "age \($0)" } ?? "age skipped"
+        let behaviorDescription = savedUserProfile.needsSimpleStepByStepGuidance
+            ? "simple step-by-step help"
+            : "normal Clicky"
+        return "On — level \(savedUserProfile.computerComfortLevel.rawValue), \(ageDescription) (\(behaviorDescription))"
+    }
 }

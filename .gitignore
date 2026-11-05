@@ -6,3 +6,12 @@ build/
 releases/
 .claude/
 coding-plans/
+
+# Your own Cloudflare Worker address (copy WorkerConfiguration.example.swift to create it)
+leanring-buddy/WorkerConfiguration.swift
+
+# Personal Xcode settings (window layout, breakpoints, schemes state)
+xcuserdata/
+
+# Local Worker secrets, if you ever use `wrangler dev`
+.dev.vars

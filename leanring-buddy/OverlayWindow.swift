@@ -170,6 +170,34 @@ struct BlueCursorView: View {
     private let onboardingVideoPlayerWidth: CGFloat = 330
     private let onboardingVideoPlayerHeight: CGFloat = 186
 
+    // MARK: First-Timer Mode Sizing
+
+    /// Level 1 and 2 First-Timer users get a bigger arrow, a bigger label,
+    /// and a longer pause while pointing, so it's easy to see and follow.
+    private var isFirstTimerSimpleGuidanceActive: Bool {
+        companionManager.isFirstTimerSimpleGuidanceActive
+    }
+
+    private var cursorTriangleSize: CGFloat {
+        isFirstTimerSimpleGuidanceActive ? 32 : 16
+    }
+
+    private var navigationBubbleFontSize: CGFloat {
+        isFirstTimerSimpleGuidanceActive ? 22 : 11
+    }
+
+    private var navigationBubbleHorizontalOffsetFromCursor: CGFloat {
+        isFirstTimerSimpleGuidanceActive ? 22 : 10
+    }
+
+    private var navigationBubbleVerticalOffsetFromCursor: CGFloat {
+        isFirstTimerSimpleGuidanceActive ? 34 : 18
+    }
+
+    private var pointingHoldDurationInSeconds: Double {
+        isFirstTimerSimpleGuidanceActive ? 12.0 : 3.0
+    }
+
     private let fullWelcomeMessage = "hey! i'm clicky"
 
     private let navigationPointerPhrases = [
@@ -263,12 +291,12 @@ struct BlueCursorView: View {
             // glow that settles, creating a "materializing" effect.
             if buddyNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty {
                 Text(navigationBubbleText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: navigationBubbleFontSize, weight: isFirstTimerSimpleGuidanceActive ? .bold : .medium))
                     .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, isFirstTimerSimpleGuidanceActive ? 14 : 8)
+                    .padding(.vertical, isFirstTimerSimpleGuidanceActive ? 8 : 4)
                     .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: isFirstTimerSimpleGuidanceActive ? 10 : 6, style: .continuous)
                             .fill(DS.Colors.overlayCursorBlue)
                             .shadow(
                                 color: DS.Colors.overlayCursorBlue.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
@@ -285,7 +313,10 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + navigationBubbleHorizontalOffsetFromCursor + (navigationBubbleSize.width / 2),
+                        y: cursorPosition.y + navigationBubbleVerticalOffsetFromCursor
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
@@ -304,7 +335,7 @@ struct BlueCursorView: View {
             // timer controls position directly at 60fps for a smooth arc flight.
             Triangle()
                 .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: 16, height: 16)
+                .frame(width: cursorTriangleSize, height: cursorTriangleSize)
                 .rotationEffect(.degrees(triangleRotationDegrees))
                 .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
                 .scaleEffect(buddyFlightScale)
@@ -588,8 +619,9 @@ struct BlueCursorView: View {
             ?? "right here!"
 
         streamNavigationBubbleCharacter(phrase: pointerPhrase, characterIndex: 0) {
-            // All characters streamed — hold for 3 seconds, then fly back
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            // All characters streamed — hold, then fly back. First-timers get
+            // much longer so they have time to find and click the thing.
+            DispatchQueue.main.asyncAfter(deadline: .now() + pointingHoldDurationInSeconds) {
                 guard self.buddyNavigationMode == .pointingAtTarget else { return }
                 self.navigationBubbleOpacity = 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

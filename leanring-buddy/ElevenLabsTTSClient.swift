@@ -30,19 +30,29 @@ final class ElevenLabsTTSClient {
 
     /// Sends `text` to ElevenLabs TTS and plays the resulting audio.
     /// Throws on network or decoding errors. Cancellation-safe.
-    func speakText(_ text: String) async throws {
+    /// `speakSlowlyAndCalmly` is used by First-Timer Mode (levels 1 and 2):
+    /// a slower speaking speed and a steadier, less excitable delivery.
+    func speakText(_ text: String, speakSlowlyAndCalmly: Bool = false) async throws {
         var request = URLRequest(url: proxyURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
 
+        var voiceSettings: [String: Any] = [
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        ]
+        if speakSlowlyAndCalmly {
+            // ElevenLabs speed ranges from 0.7 to 1.2 (1.0 is normal).
+            // Higher stability makes the voice calmer and more even.
+            voiceSettings["speed"] = 0.85
+            voiceSettings["stability"] = 0.75
+        }
+
         let body: [String: Any] = [
             "text": text,
             "model_id": "eleven_flash_v2_5",
-            "voice_settings": [
-                "stability": 0.5,
-                "similarity_boost": 0.75
-            ]
+            "voice_settings": voiceSettings
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

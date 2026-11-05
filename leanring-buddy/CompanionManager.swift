@@ -70,7 +70,7 @@ final class CompanionManager: ObservableObject {
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    private static let workerBaseURL = ClickyWorkerConfiguration.workerBaseURL
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -78,6 +78,39 @@ final class CompanionManager: ObservableObject {
 
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
+    }()
+
+    /// Runs First-Timer Mode (the onboarding questions and the saved
+    /// age + comfort level profile). Speaks through the same ElevenLabs voice.
+    lazy var firstTimerModeController: FirstTimerModeController = {
+        return FirstTimerModeController(
+            speakTextAloud: { [weak self] textToSpeak in
+                self?.speakTextAloudForFirstTimerMode(textToSpeak)
+            },
+            sendUserRequestToClaude: { [weak self] helperButtonRequestText in
+                self?.sendFirstTimerHelperButtonRequestToClaude(helperButtonRequestText)
+            },
+            requestToTurnOffFirstTimerMode: { [weak self] in
+                self?.turnOffFirstTimerMode()
+            },
+            requestToStartWelcomeDemo: { [weak self] in
+                self?.runFirstTimerWelcomeDemo()
+            },
+            requestToStopWelcomeDemo: { [weak self] in
+                self?.stopFirstTimerWelcomeDemo()
+            }
+        )
+    }()
+
+    /// Mirrors whether a level 1 or 2 First-Timer profile is active, so the
+    /// cursor overlay (which observes CompanionManager) can draw a bigger
+    /// arrow and label.
+    @Published private(set) var isFirstTimerSimpleGuidanceActive: Bool = false
+    private var firstTimerProfileCancellable: AnyCancellable?
+
+    /// Shows the big, clickable First-Timer panel whenever the controller asks.
+    private lazy var firstTimerPanelWindowManager: FirstTimerPanelWindowManager = {
+        return FirstTimerPanelWindowManager(firstTimerModeController: firstTimerModeController)
     }()
 
     /// Conversation history so Claude remembers prior exchanges within a session.
@@ -183,6 +216,18 @@ final class CompanionManager: ObservableObject {
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
 
+        // Create the First-Timer panel manager now so it starts listening
+        // for show/hide requests from the First-Timer controller.
+        _ = firstTimerPanelWindowManager
+        firstTimerProfileCancellable = firstTimerModeController.$savedUserProfile
+            .map { savedUserProfile in
+                savedUserProfile?.needsSimpleStepByStepGuidance ?? false
+            }
+            .removeDuplicates()
+            .sink { [weak self] isSimpleGuidanceActiveNow in
+                self?.isFirstTimerSimpleGuidanceActive = isSimpleGuidanceActiveNow
+            }
+
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -228,6 +273,238 @@ final class CompanionManager: ObservableObject {
         overlayWindowManager.hasShownOverlayBefore = false
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
         isOverlayVisible = true
+    }
+
+    // MARK: - First-Timer Mode
+
+    /// Starts (or restarts) First-Timer Mode from the menu bar panel: makes
+    /// sure the blue cursor is visible, then asks the onboarding questions.
+    /// Skips the founder's intro video on purpose — first-timers get their
+    /// own gentler introduction instead.
+    func startFirstTimerMode() {
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
+        // Start from a clean conversation so earlier chats don't leak into
+        // the first-timer experience.
+        conversationHistory.removeAll()
+
+        firstTimerModeController.startFirstTimerOnboarding()
+    }
+
+    /// Turns First-Timer Mode off and returns Clicky to its normal behavior.
+    func turnOffFirstTimerMode() {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        firstTimerModeController.turnOffFirstTimerMode()
+        conversationHistory.removeAll()
+    }
+
+    /// Speaks a fixed First-Timer line (like an onboarding question) with
+    /// Clicky's normal ElevenLabs voice. Interrupts anything already playing
+    /// so two voices never talk over each other.
+    private func speakTextAloudForFirstTimerMode(_ textToSpeak: String) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        firstTimerFallbackSpeechSynthesizer?.stopSpeaking()
+
+        currentResponseTask = Task {
+            do {
+                try await elevenLabsTTSClient.speakText(textToSpeak, speakSlowlyAndCalmly: true)
+            } catch is CancellationError {
+                // A newer line or the user's push-to-talk interrupted this one.
+            } catch {
+                // Cancelling a network request surfaces as a URLError, not a
+                // CancellationError, so check explicitly before falling back.
+                guard !Task.isCancelled else { return }
+                print("⚠️ First-Timer TTS error: \(error)")
+                // Fall back to the built-in Mac voice so the question is still heard.
+                speakWithBuiltInMacVoice(textToSpeak)
+            }
+        }
+    }
+
+    // MARK: - First-Timer Welcome Demo
+
+    /// Kept alive while the built-in Mac voice is speaking a fallback line,
+    /// so we can wait for it to finish.
+    private var firstTimerFallbackSpeechSynthesizer: NSSpeechSynthesizer?
+
+    private static let firstTimerWelcomeDemoSystemPrompt = """
+    you're clicky, showing a brand-new computer user what you can do for the very first time. they are not comfortable with computers. \
+    look at the screenshot and pick ONE friendly, easy-to-recognise thing to point at, like the clock in the top right corner, \
+    the little apple logo in the top left corner, or a big obvious picture on the screen. \
+    never pick anything private or personal (like messages, emails, names, or photos of people) and never pick anything technical (like code). \
+    reply with one short, warm sentence of under twenty words that names it in plain words and says what it's for, \
+    for example: "see this? that's the clock. it always shows you the time." no emojis, no lists. \
+    then append exactly one tag at the very end: [POINT:x,y:label] where label is one to three words. \
+    the screenshot is labeled with its pixel dimensions; use those as the coordinate space. origin (0,0) is the top-left corner. \
+    x increases to the right, y increases downward.
+    """
+
+    /// The ~20 second welcome for brand-new level 1 users: say what Clicky
+    /// can do, point at one friendly thing, then explain how help works.
+    /// Uses the same voice, screenshot, Claude, and arrow as normal Clicky.
+    private func runFirstTimerWelcomeDemo() {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        clearDetectedElementLocation()
+
+        currentResponseTask = Task {
+            defer {
+                // However the demo ends (finished, skipped, or interrupted by
+                // push-to-talk), move on to the helper box so nothing gets stuck.
+                firstTimerModeController.finishWelcomeDemo()
+            }
+
+            await speakFirstTimerLineAndWaitUntilFinished(FirstTimerModeController.welcomeDemoIntroductionLine)
+            guard !Task.isCancelled else { return }
+
+            let welcomeDemoPointingTarget = await findFriendlyThingToPointAtForWelcomeDemo()
+            guard !Task.isCancelled else { return }
+
+            detectedElementBubbleText = "👉 \(welcomeDemoPointingTarget.elementLabel)"
+            detectedElementScreenLocation = welcomeDemoPointingTarget.globalScreenLocation
+            detectedElementDisplayFrame = welcomeDemoPointingTarget.displayFrame
+            firstTimerModeController.showWelcomeDemoPointingText(welcomeDemoPointingTarget.spokenLine)
+            print("🎬 First-Timer welcome demo: pointing at \"\(welcomeDemoPointingTarget.elementLabel)\"")
+
+            // Give the arrow a moment to fly there before talking about it.
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard !Task.isCancelled else { return }
+
+            await speakFirstTimerLineAndWaitUntilFinished(welcomeDemoPointingTarget.spokenLine)
+            guard !Task.isCancelled else { return }
+
+            await speakFirstTimerLineAndWaitUntilFinished(FirstTimerModeController.welcomeDemoClosingLine)
+        }
+    }
+
+    /// Stops the welcome demo right away (the "Skip" button).
+    private func stopFirstTimerWelcomeDemo() {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        firstTimerFallbackSpeechSynthesizer?.stopSpeaking()
+        clearDetectedElementLocation()
+    }
+
+    private struct WelcomeDemoPointingTarget {
+        let globalScreenLocation: CGPoint
+        let displayFrame: CGRect
+        let elementLabel: String
+        let spokenLine: String
+    }
+
+    /// Asks Claude to pick one friendly thing on the user's screen. If that
+    /// fails for any reason, falls back to the Apple logo in the top-left
+    /// corner, which is always there, so the demo always works.
+    private func findFriendlyThingToPointAtForWelcomeDemo() async -> WelcomeDemoPointingTarget {
+        do {
+            let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+            if let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) {
+                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
+                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
+
+                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                    images: labeledImages,
+                    systemPrompt: Self.firstTimerWelcomeDemoSystemPrompt,
+                    userPrompt: "show me what you can do by pointing at one friendly thing on my screen",
+                    onTextChunk: { _ in }
+                )
+
+                let responseWithSinglePointTag = FirstTimerSafetyGuard.keepOnlyOnePointTag(in: fullResponseText)
+                let parseResult = Self.parsePointingCoordinates(from: responseWithSinglePointTag)
+
+                if let pointCoordinate = parseResult.coordinate, !parseResult.spokenText.isEmpty {
+                    return WelcomeDemoPointingTarget(
+                        globalScreenLocation: Self.convertScreenshotPixelPointToGlobalScreenLocation(
+                            screenshotPixelPoint: pointCoordinate,
+                            screenCapture: cursorScreenCapture
+                        ),
+                        displayFrame: cursorScreenCapture.displayFrame,
+                        elementLabel: parseResult.elementLabel ?? "here",
+                        spokenLine: parseResult.spokenText
+                    )
+                }
+            }
+        } catch {
+            print("⚠️ First-Timer welcome demo couldn't ask Claude, using the Apple logo instead: \(error)")
+        }
+
+        return Self.appleLogoWelcomeDemoPointingTarget()
+    }
+
+    /// The Apple logo sits at the top-left of the screen with the menu bar.
+    private static func appleLogoWelcomeDemoPointingTarget() -> WelcomeDemoPointingTarget {
+        let menuBarScreenFrame = NSScreen.screens.first?.frame ?? NSScreen.main?.frame ?? .zero
+        let appleLogoGlobalLocation = CGPoint(
+            x: menuBarScreenFrame.minX + 22,
+            y: menuBarScreenFrame.maxY - 12
+        )
+        return WelcomeDemoPointingTarget(
+            globalScreenLocation: appleLogoGlobalLocation,
+            displayFrame: menuBarScreenFrame,
+            elementLabel: "apple logo",
+            spokenLine: "See this little apple, up in the top left corner? That's the Apple menu. It's always there."
+        )
+    }
+
+    /// Converts a point in screenshot pixels (top-left origin) to a global
+    /// AppKit screen location (bottom-left origin) — the same math the main
+    /// response pipeline uses for [POINT:...] tags.
+    private static func convertScreenshotPixelPointToGlobalScreenLocation(
+        screenshotPixelPoint: CGPoint,
+        screenCapture: CompanionScreenCapture
+    ) -> CGPoint {
+        let screenshotWidth = CGFloat(screenCapture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(screenCapture.screenshotHeightInPixels)
+        let displayWidth = CGFloat(screenCapture.displayWidthInPoints)
+        let displayHeight = CGFloat(screenCapture.displayHeightInPoints)
+        let displayFrame = screenCapture.displayFrame
+
+        let clampedX = max(0, min(screenshotPixelPoint.x, screenshotWidth))
+        let clampedY = max(0, min(screenshotPixelPoint.y, screenshotHeight))
+        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+        let appKitY = displayHeight - displayLocalY
+
+        return CGPoint(
+            x: displayLocalX + displayFrame.origin.x,
+            y: appKitY + displayFrame.origin.y
+        )
+    }
+
+    /// Speaks one First-Timer line slowly and returns only when it has
+    /// finished playing (or was interrupted), so demo lines never overlap.
+    private func speakFirstTimerLineAndWaitUntilFinished(_ lineToSpeak: String) async {
+        do {
+            try await elevenLabsTTSClient.speakText(lineToSpeak, speakSlowlyAndCalmly: true)
+            while elevenLabsTTSClient.isPlaying {
+                try await Task.sleep(nanoseconds: 150_000_000)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            print("⚠️ First-Timer TTS error, using the Mac voice instead: \(error)")
+            let fallbackSpeechSynthesizer = NSSpeechSynthesizer()
+            firstTimerFallbackSpeechSynthesizer = fallbackSpeechSynthesizer
+            fallbackSpeechSynthesizer.startSpeaking(lineToSpeak)
+            while fallbackSpeechSynthesizer.isSpeaking && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+    }
+
+    /// Called by the helper bar's "I did it" and "I'm lost" buttons. Works
+    /// exactly like the user saying the same words with push-to-talk.
+    private func sendFirstTimerHelperButtonRequestToClaude(_ helperButtonRequestText: String) {
+        // Stop pointing at the old step before looking at the screen again.
+        clearDetectedElementLocation()
+        sendTranscriptToClaudeWithScreenshot(transcript: helperButtonRequestText)
     }
 
     private func stopOnboardingMusic() {
@@ -494,6 +771,7 @@ final class CompanionManager: ObservableObject {
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
             elevenLabsTTSClient.stopPlayback()
+            firstTimerFallbackSpeechSynthesizer?.stopSpeaking()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -521,6 +799,14 @@ final class CompanionManager: ObservableObject {
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+
+                        // While First-Timer Mode is asking its onboarding
+                        // questions, the answer goes there instead of Claude.
+                        if let firstTimerModeController = self?.firstTimerModeController,
+                           firstTimerModeController.handleSpokenTranscriptIfWaitingForOnboardingAnswer(finalTranscript) {
+                            return
+                        }
+
                         self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                     }
                 )
@@ -586,6 +872,41 @@ final class CompanionManager: ObservableObject {
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
+        firstTimerFallbackSpeechSynthesizer?.stopSpeaking()
+
+        // First-Timer Mode levels 1 and 2 use a plain-language prompt, a
+        // single-arrow safety rule, large on-screen text, and a slower voice.
+        let isFirstTimerSimpleGuidanceForThisRequest = firstTimerModeController.isSimpleStepByStepGuidanceActive
+
+        // "I'm lost" (button or spoken) becomes a request to re-explain the
+        // last step much more simply.
+        // Remember what they're trying to do (before the prompt is built), so
+        // follow-ups like "I did it" stay focused on the same task.
+        // First-Timer safety rule, enforced in code: a PAN or Aadhaar number
+        // said out loud is blanked out before the transcript leaves the Mac.
+        let transcriptToUse = isFirstTimerSimpleGuidanceForThisRequest
+            ? FirstTimerSafetyGuard.hidePrivateIdentityNumbers(in: transcript)
+            : transcript
+
+        if isFirstTimerSimpleGuidanceForThisRequest {
+            firstTimerModeController.rememberGoalIfThisIsANewRequest(transcriptToUse)
+        }
+
+        var userRequestToSendToClaude = transcriptToUse
+        if isFirstTimerSimpleGuidanceForThisRequest
+            && FirstTimerModeController.isAskingToReExplainLastStep(transcriptToUse) {
+            userRequestToSendToClaude = FirstTimerModeController.buildRequestToReExplainLastStep(
+                lastStepClickySpoke: conversationHistory.last?.assistantResponse
+            )
+        }
+
+        let systemPromptForThisRequest = isFirstTimerSimpleGuidanceForThisRequest
+            ? firstTimerModeController.buildSimpleGuidanceSystemPrompt()
+            : Self.companionVoiceResponseSystemPrompt
+
+        if isFirstTimerSimpleGuidanceForThisRequest {
+            firstTimerModeController.showWaitingForClaudeOnScreen()
+        }
 
         currentResponseTask = Task {
             // Stay in processing (spinner) state — no streaming text displayed
@@ -610,21 +931,51 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
-                    }
-                )
+                let askClaudeForResponse: () async throws -> (text: String, duration: TimeInterval) = {
+                    try await self.claudeAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: systemPromptForThisRequest,
+                        conversationHistory: historyForAPI,
+                        userPrompt: userRequestToSendToClaude,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                }
+
+                let fullResponseText: String
+                do {
+                    fullResponseText = try await askClaudeForResponse().text
+                } catch where isFirstTimerSimpleGuidanceForThisRequest && !Task.isCancelled {
+                    // First-timers shouldn't see a hiccup (for example a brief
+                    // "overloaded" or rate-limit reply), so quietly try once more.
+                    print("⚠️ First-Timer: Claude request failed, retrying once: \(error)")
+                    try await Task.sleep(nanoseconds: 1_500_000_000)
+                    fullResponseText = try await askClaudeForResponse().text
+                }
 
                 guard !Task.isCancelled else { return }
 
+                // First-Timer safety rules, enforced in code: the reply can only
+                // speak and point at one thing. Any click / type / fill / submit
+                // style tag is removed before anything happens.
+                let responseTextToActOn = isFirstTimerSimpleGuidanceForThisRequest
+                    ? FirstTimerSafetyGuard.makeClaudeResponseSafeForFirstTimerMode(fullResponseText).responseTextWithAtMostOnePointTag
+                    : fullResponseText
+
                 // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-                let spokenText = parseResult.spokenText
+                let parseResult = Self.parsePointingCoordinates(from: responseTextToActOn)
+                // When a first-timer is pointed at a final button (submit, pay,
+                // confirm...), a fixed "only you decide" warning is always added.
+                let isFirstTimerPointingAtFinalButton = isFirstTimerSimpleGuidanceForThisRequest
+                    && parseResult.coordinate != nil
+                    && FirstTimerSafetyGuard.isPointingAtFinalButton(pointedElementLabel: parseResult.elementLabel)
+                let spokenText = isFirstTimerPointingAtFinalButton
+                    ? FirstTimerSafetyGuard.addFinalButtonWarningIfNeeded(
+                        spokenText: parseResult.spokenText,
+                        pointedElementLabel: parseResult.elementLabel
+                    )
+                    : parseResult.spokenText
 
                 // Handle element pointing if Claude returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
@@ -673,6 +1024,16 @@ final class CompanionManager: ObservableObject {
                         y: appKitY + displayFrame.origin.y
                     )
 
+                    // First-timers see the name of the thing (for example
+                    // "👉 chrome") instead of a random phrase like "right here!"
+                    if isFirstTimerSimpleGuidanceForThisRequest,
+                       let pointedElementLabel = parseResult.elementLabel,
+                       !pointedElementLabel.isEmpty {
+                        detectedElementBubbleText = isFirstTimerPointingAtFinalButton
+                            ? "⚠️ \(pointedElementLabel): only you decide"
+                            : "👉 \(pointedElementLabel)"
+                    }
+
                     detectedElementScreenLocation = globalLocation
                     detectedElementDisplayFrame = displayFrame
                     ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
@@ -684,9 +1045,17 @@ final class CompanionManager: ObservableObject {
                 // Save this exchange to conversation history (with the point tag
                 // stripped so it doesn't confuse future context)
                 conversationHistory.append((
-                    userTranscript: transcript,
+                    userTranscript: userRequestToSendToClaude,
                     assistantResponse: spokenText
                 ))
+
+                if isFirstTimerSimpleGuidanceForThisRequest {
+                    firstTimerModeController.showLatestSpokenStepOnScreen(
+                        spokenText,
+                        isPointingAtSomething: parseResult.coordinate != nil,
+                        isPointingAtFinalButton: isFirstTimerPointingAtFinalButton
+                    )
+                }
 
                 // Keep only the last 10 exchanges to avoid unbounded context growth
                 if conversationHistory.count > 10 {
@@ -701,21 +1070,44 @@ final class CompanionManager: ObservableObject {
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
+                        try await elevenLabsTTSClient.speakText(
+                            spokenText,
+                            speakSlowlyAndCalmly: isFirstTimerSimpleGuidanceForThisRequest
+                        )
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
+                        // A newer request cancelled this one (the user spoke or
+                        // pressed a button). Cancelling a download surfaces as a
+                        // URLError, so check explicitly — this isn't a real failure.
+                        guard !Task.isCancelled else { return }
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                        if isFirstTimerSimpleGuidanceForThisRequest {
+                            // First-timers still hear the actual step, in the
+                            // Mac's built-in voice, instead of an error message.
+                            speakWithBuiltInMacVoice(spokenText)
+                        } else {
+                            speakCreditsErrorFallback()
+                        }
                     }
                 }
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
+                // Same as above: a cancelled request isn't a real failure.
+                guard !Task.isCancelled else { return }
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                if isFirstTimerSimpleGuidanceForThisRequest {
+                    // Don't leave the helper bar stuck on "One moment…", and
+                    // don't confuse a first-timer with a message about credits.
+                    let gentleRetryMessage = "Sorry, I had a little trouble just now. Please ask me again, or press I did it."
+                    firstTimerModeController.showLatestSpokenStepOnScreen(gentleRetryMessage, isPointingAtSomething: false)
+                    speakWithBuiltInMacVoice(gentleRetryMessage)
+                } else {
+                    speakCreditsErrorFallback()
+                }
             }
 
             if !Task.isCancelled {
@@ -753,6 +1145,16 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.fadeOutAndHideOverlay()
             isOverlayVisible = false
         }
+    }
+
+    /// Speaks text with the Mac's built-in voice. Used by First-Timer Mode
+    /// when ElevenLabs or Claude fails, so the user still hears something
+    /// helpful instead of an error.
+    private func speakWithBuiltInMacVoice(_ textToSpeak: String) {
+        let builtInSpeechSynthesizer = NSSpeechSynthesizer()
+        firstTimerFallbackSpeechSynthesizer = builtInSpeechSynthesizer
+        builtInSpeechSynthesizer.startSpeaking(textToSpeak)
+        voiceState = .responding
     }
 
     /// Speaks a hardcoded error message using macOS system TTS when API
